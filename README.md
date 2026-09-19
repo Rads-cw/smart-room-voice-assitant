@@ -18,7 +18,7 @@ The prototype represents a miniature smart-room environment built around the Ard
 
 ## Hardware Setup
 
-![Hardware Setup](media/IMG_588.jpeg)
+![Hardware Setup](media/IMG_5289.jpeg)
 
 This image shows the connected embedded hardware used in the project, including the Arduino board, buzzer module, DHT sensor, breadboard wiring, and OLED display.
 
