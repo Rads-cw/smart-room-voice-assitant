@@ -1,1 +1,495 @@
+/*
+  Voice-Controlled Smart System
+  Board: Arduino Nano 33 BLE Sense
 
+  Flow:
+  1. OLED shows "GET READY"
+  2. Recording LED blinks
+  3. OLED shows "SPEAK NOW"
+  4. Recording starts
+  5. OLED shows "PROCESSING"
+  6. Command result is displayed
+
+  Notes:
+  - Buzzer is ONLY used for the "music" command
+  - LED on A0 controls the external light
+  - Built-in LED shows recording activity
+*/
+
+#define EIDSP_QUANTIZE_FILTERBANK 0
+
+#include <PDM.h>
+#include <CENG440_Project_inferencing.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Servo.h>
+
+// Pin Definitions
+#define DHT_PIN 2
+#define BUZZER_PIN 3
+#define LED_PIN A0
+#define SERVO_PIN 4
+#define DHT_TYPE DHT11
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+
+// Door Servo Angles
+const int DOOR_CLOSED_ANGLE = 0;
+const int DOOR_OPEN_ANGLE = 90;
+
+// Objects
+DHT dht(DHT_PIN, DHT_TYPE);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Servo doorServo;
+
+// State
+bool ledState = false;
+bool doorOpen = false;
+bool musicState = false;
+bool tempScreenOn = false;
+
+const int RECORD_LED = LED_BUILTIN;
+
+// Voice Timing
+const int GET_READY_HOLD_MS = 1200;
+const int CUE_FLASHES = 3;
+const int CUE_ON_MS = 250;
+const int CUE_OFF_MS = 250;
+const int SPEAK_NOW_HOLD_MS = 300;
+const int RESULT_HOLD_MS = 1800;
+
+// Music
+const int melody[] = {262, 294, 330, 349, 392, 440, 494, 523};
+const int noteDur[] = {200, 200, 200, 200, 200, 200, 200, 400};
+const int noteCount = 8;
+
+// Edge Impulse Audio Buffers
+typedef struct {
+  int16_t *buffer;
+  uint8_t buf_ready;
+  uint32_t buf_count;
+  uint32_t n_samples;
+} inference_t;
+
+static inference_t inference;
+static signed short sampleBuffer[2048];
+static bool debug_nn = false;
+
+// OLED Helpers
+void showListeningIdle() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.println("Voice System Ready");
+
+  display.setCursor(0, 14);
+  display.println("Say commands like:");
+
+  display.setCursor(0, 30);
+  display.println("light  door");
+
+  display.setCursor(0, 42);
+  display.println("temp   music");
+
+  display.setCursor(0, 56);
+  display.println("Waiting...");
+
+  display.display();
+}
+
+void showGetReady() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+
+  display.setCursor(0, 10);
+  display.println("GET READY");
+
+  display.setTextSize(1);
+  display.setCursor(0, 42);
+  display.println("Prepare to speak");
+
+  display.display();
+}
+
+void showSpeakNow() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+
+  display.setCursor(0, 10);
+  display.println("SPEAK NOW");
+
+  display.setTextSize(1);
+  display.setCursor(0, 42);
+  display.println("Say one command");
+
+  display.display();
+}
+
+void showProcessing() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+
+  display.setCursor(0, 10);
+  display.println("WAIT");
+
+  display.setTextSize(1);
+  display.setCursor(0, 42);
+  display.println("Processing voice...");
+
+  display.display();
+}
+
+void showMessage(const char *title, const char *msg) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.println(title);
+
+  display.setTextSize(2);
+  display.setCursor(0, 22);
+  display.println(msg);
+
+  display.display();
+}
+
+void showTemperatureScreen() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("TEMPERATURE");
+
+  if (isnan(temp) || isnan(hum)) {
+    display.setCursor(0, 20);
+    display.println("Sensor error!");
+    Serial.println("DHT11 read failed. Check wiring on D2.");
+  } else {
+    display.setTextSize(2);
+    display.setCursor(0, 16);
+    display.print(temp, 1);
+    display.println(" C");
+
+    display.setTextSize(1);
+    display.setCursor(0, 46);
+    display.print("Humidity: ");
+    display.print(hum, 1);
+    display.println("%");
+
+    Serial.print("Temp: ");
+    Serial.print(temp);
+    Serial.print(" C | Humidity: ");
+    Serial.print(hum);
+    Serial.println("%");
+  }
+
+  display.display();
+}
+
+// Command Handlers
+void handleLights() {
+  ledState = !ledState;
+  digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+
+  showMessage("LIGHTS", ledState ? "ON" : "OFF");
+
+  Serial.print("Lights -> ");
+  Serial.println(ledState ? "ON" : "OFF");
+}
+
+void handleDoor() {
+  doorOpen = !doorOpen;
+  doorServo.write(doorOpen ? DOOR_OPEN_ANGLE : DOOR_CLOSED_ANGLE);
+
+  showMessage("DOOR", doorOpen ? "OPEN" : "CLOSED");
+
+  Serial.print("Door -> ");
+  Serial.println(doorOpen ? "OPEN" : "CLOSED");
+}
+
+void handleTemperature() {
+  tempScreenOn = !tempScreenOn;
+
+  if (tempScreenOn) {
+    showTemperatureScreen();
+    Serial.println("Temperature screen -> ON");
+  } else {
+    showListeningIdle();
+    Serial.println("Temperature screen -> OFF");
+  }
+}
+
+void handleMusic() {
+  musicState = !musicState;
+
+  if (musicState) {
+    showMessage("MUSIC", "ON");
+    Serial.println("Music -> ON");
+
+    for (int i = 0; i < noteCount; i++) {
+      tone(BUZZER_PIN, melody[i], noteDur[i]);
+      delay(noteDur[i] + 30);
+    }
+
+    noTone(BUZZER_PIN);
+  } else {
+    noTone(BUZZER_PIN);
+    showMessage("MUSIC", "OFF");
+    Serial.println("Music -> OFF");
+  }
+}
+
+// Recording Cue
+void readyCue(int flashes, int onTime, int offTime) {
+  for (int i = 0; i < flashes; i++) {
+    digitalWrite(RECORD_LED, HIGH);
+    delay(onTime);
+
+    digitalWrite(RECORD_LED, LOW);
+    delay(offTime);
+  }
+}
+
+// Edge Impulse Helpers
+static void pdm_data_ready_inference_callback(void) {
+  int bytesAvailable = PDM.available();
+  int bytesRead = PDM.read((char *)&sampleBuffer[0], bytesAvailable);
+
+  if (inference.buf_ready == 0) {
+    for (int i = 0; i < (bytesRead >> 1); i++) {
+      inference.buffer[inference.buf_count++] = sampleBuffer[i];
+
+      if (inference.buf_count >= inference.n_samples) {
+        inference.buf_count = 0;
+        inference.buf_ready = 1;
+        break;
+      }
+    }
+  }
+}
+
+static bool microphone_inference_start(uint32_t n_samples) {
+  inference.buffer = (int16_t *)malloc(n_samples * sizeof(int16_t));
+
+  if (inference.buffer == NULL) {
+    return false;
+  }
+
+  inference.buf_count = 0;
+  inference.n_samples = n_samples;
+  inference.buf_ready = 0;
+
+  PDM.onReceive(&pdm_data_ready_inference_callback);
+  PDM.setBufferSize(4096);
+
+  if (!PDM.begin(1, EI_CLASSIFIER_FREQUENCY)) {
+    ei_printf("Failed to start PDM!\n");
+    free(inference.buffer);
+    return false;
+  }
+
+  PDM.setGain(127);
+  return true;
+}
+
+static bool microphone_inference_record(void) {
+  inference.buf_ready = 0;
+  inference.buf_count = 0;
+
+  while (inference.buf_ready == 0) {
+    delay(10);
+  }
+
+  return true;
+}
+
+static int microphone_audio_signal_get_data(
+  size_t offset,
+  size_t length,
+  float *out_ptr
+) {
+  numpy::int16_to_float(&inference.buffer[offset], out_ptr, length);
+  return 0;
+}
+
+static void microphone_inference_end(void) {
+  PDM.end();
+  free(inference.buffer);
+}
+
+// Keyword Detection
+String runKeywordDetection() {
+  showGetReady();
+  delay(GET_READY_HOLD_MS);
+
+  readyCue(CUE_FLASHES, CUE_ON_MS, CUE_OFF_MS);
+
+  showSpeakNow();
+  delay(SPEAK_NOW_HOLD_MS);
+
+  digitalWrite(RECORD_LED, HIGH);
+  bool ok = microphone_inference_record();
+  digitalWrite(RECORD_LED, LOW);
+
+  showProcessing();
+
+  if (!ok) {
+    Serial.println("ERR: Failed to record audio...");
+    showMessage("ERROR", "RECORD");
+    return "";
+  }
+
+  signal_t signal;
+  signal.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
+  signal.get_data = &microphone_audio_signal_get_data;
+
+  ei_impulse_result_t result = {0};
+  EI_IMPULSE_ERROR r = run_classifier(&signal, &result, debug_nn);
+
+  if (r != EI_IMPULSE_OK) {
+    Serial.print("ERR: Failed to run classifier (");
+    Serial.print(r);
+    Serial.println(")");
+
+    showMessage("ERROR", "MODEL");
+    return "";
+  }
+
+  float bestScore = 0.0f;
+  String bestLabel = "";
+
+  Serial.println("Predictions:");
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+    Serial.print("  ");
+    Serial.print(result.classification[ix].label);
+    Serial.print(": ");
+    Serial.println(result.classification[ix].value, 5);
+
+    if (result.classification[ix].value > bestScore) {
+      bestScore = result.classification[ix].value;
+      bestLabel = String(result.classification[ix].label);
+    }
+  }
+
+  const float THRESHOLD = 0.60f;
+
+  if (bestScore >= THRESHOLD) {
+    Serial.print("Detected keyword: ");
+    Serial.print(bestLabel);
+    Serial.print(" (");
+    Serial.print(bestScore, 3);
+    Serial.println(")");
+
+    return bestLabel;
+  }
+
+  Serial.println("No confident keyword detected.");
+  showMessage("NO MATCH", "TRY AGAIN");
+
+  return "";
+}
+
+// Setup
+void setup() {
+  Serial.begin(115200);
+  while (!Serial && millis() < 3000);
+
+  Serial.println("Voice Control System + Edge Impulse");
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RECORD_LED, OUTPUT);
+
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(RECORD_LED, LOW);
+  noTone(BUZZER_PIN);
+
+  // Start door in CLOSED position
+  doorServo.attach(SERVO_PIN);
+  doorServo.write(DOOR_CLOSED_ANGLE);
+  delay(500);
+
+  dht.begin();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED not found! Check wiring/address.");
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.display();
+
+  ei_printf("Inferencing settings:\n");
+  ei_printf("\tInterval: %.2f ms\n", (float)EI_CLASSIFIER_INTERVAL_MS);
+  ei_printf("\tFrame size: %d\n", EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
+  ei_printf(
+    "\tSample length: %d ms\n",
+    EI_CLASSIFIER_RAW_SAMPLE_COUNT / 16
+  );
+  ei_printf(
+    "\tNo. of classes: %d\n",
+    sizeof(ei_classifier_inferencing_categories) /
+      sizeof(ei_classifier_inferencing_categories[0])
+  );
+
+  if (!microphone_inference_start(EI_CLASSIFIER_RAW_SAMPLE_COUNT)) {
+    ei_printf("ERR: Could not allocate audio buffer or start PDM\n");
+    while (true);
+  }
+
+  showListeningIdle();
+  Serial.println("System ready. Waiting for voice commands...");
+}
+
+// Main Loop
+void loop() {
+  String keyword = runKeywordDetection();
+
+  if (keyword.length() == 0) {
+    delay(RESULT_HOLD_MS);
+    showListeningIdle();
+    return;
+  }
+
+  if (keyword == "lights" || keyword == "light") {
+    handleLights();
+  } else if (keyword == "door") {
+    handleDoor();
+  } else if (keyword == "temperature" || keyword == "temp") {
+    handleTemperature();
+  } else if (keyword == "music") {
+    handleMusic();
+  } else if (keyword == "_noise" || keyword == "unknown") {
+    Serial.println("Background/noise class ignored.");
+    showMessage("NOISE", "IGNORED");
+  } else {
+    Serial.print("Unknown label from model: ");
+    Serial.println(keyword);
+    showMessage("UNKNOWN", "COMMAND");
+  }
+
+  delay(RESULT_HOLD_MS);
+
+  if (tempScreenOn) {
+    showTemperatureScreen();
+  } else {
+    showListeningIdle();
+  }
+}
+
+#if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_MICROPHONE
+#error "Invalid model for current sensor."
+#endif
