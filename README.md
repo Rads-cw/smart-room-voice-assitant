@@ -168,4 +168,21 @@ Main libraries used:
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Servo.h>
+#include <Servo.h>\
+```
+## Demo
+
+A short demonstration of the working smart-room voice assistant is available here:
+
+[Watch the project demo on YouTube](https://youtube.com/shorts/akD4HUnLslI?feature=share)
+
+The demo shows the physical smart-room prototype responding to voice commands and interacting with the connected hardware.
+
+## Model Availability
+
+The trained TinyML model is not included in this repository.
+
+The model was trained using a dataset that contains voice recordings collected from friends, family members, and other project participants. To avoid publicly distributing a model derived from personally contributed voice data without explicit permission from every participant, the trained model and original audio dataset were kept private.
+
+The repository still includes the project implementation, system design, hardware integration, model workflow, and evaluation details needed to understand how the system was developed and deployed.
+
